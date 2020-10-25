@@ -76,36 +76,6 @@ broom::augment(modelo_lm, newdata = nueva_test) %>%
 
 rsq 0.415 con todas las vbles
 
-## Regularización
-
-```{r}
-features_matrix_train <- nueva_train %>%
-  select(-valor_real) %>% 
-  mutate(across(c(Edad_al_momento_de_atencion, diabetes.consulta:ccv.urg, n_procedimiento:n_consulta), scale)) %>%
-  as.data.table() %>%
-  #one_hot(cols = c("Sexo", "Zona_residencia", "multi")) %>% 
-data.matrix()
-
-features_matrix_test <- nueva_test %>%
-  select(-valor_real) %>%
-  mutate(across(c(Edad_al_momento_de_atencion, diabetes.consulta:ccv.urg, n_procedimiento:n_consulta), scale)) %>% 
-  as.data.table() %>% 
-  #one_hot(cols = c("Sexo", "Zona_residencia", "multi")) %>% 
-  data.matrix()
-
-
-modelo_lasso <- cv.glmnet(features_matrix_train, nueva_train$valor_real)
-
-prediccion_lasso <- predict(modelo_lasso, 
-        s = modelo_lasso$lambda.min, 
-        newx = features_matrix_test, 
-        type = "response")
-
-tibble(truth = nueva_test$valor_real,
-       estimate = prediccion_lasso[,1]) %>% 
-  metrics(truth = truth, estimate = estimate)
-```
-
 ## Boosting
 
 ```{r}
