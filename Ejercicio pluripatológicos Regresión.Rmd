@@ -1,0 +1,172 @@
+---
+title: "Ejercicio pluripatológicos Regresión"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Librerías
+
+```{r}
+library(data.table) # Loading
+library(tidyverse) # Wrangling
+library(readxl) #Excel
+library(yardstick) # Metrics
+library(broom) # Tidy models
+library(writexl) # Excel
+library(glmnet) # Regularization
+library(mltools) # One hot encoding
+library(gbm) # Boosting
+library(latex2exp) # Expresiones LaTex en las gráficas
+library(ggthemes) # Presentación
+```
+
+## Limpieza de datos
+
+```{r}
+raw_nueva <- read_excel("../src/nueva_eps_adaptado.xlsx")
+boosting_alejandro <- read_excel("../src/LGB_dataset_con_valor.xlsx")
+
+## Conteo de NA
+raw_nueva %>% 
+  summarise_all(funs(sum(is.na(.))))
+
+## Convertir a factores
+nueva_procesado <- raw_nueva %>% 
+  select(-n_otros, -Tipo_usuario, -es_pluri, -multi) %>%
+  rowwise() %>% 
+  mutate(multi = sum(tiene_diabetes, tiene_hta, tiene_epoc, tiene_ccv)) %>% 
+  ungroup() %>%
+  filter(Numero_identificacion != 734944,
+         Numero_identificacion != 692999,
+         Numero_identificacion != 615038) %>% 
+  mutate(Numero_identificacion = as.character(Numero_identificacion),
+         Sexo = as_factor(Sexo),
+         Zona_residencia = as_factor(Zona_residencia),
+         tiene_diabetes = as_factor(tiene_diabetes),
+         tiene_hta = as_factor(tiene_hta),
+         tiene_epoc = as_factor(tiene_epoc),
+         tiene_ccv = as_factor(tiene_ccv),
+         multi = as_factor(multi)
+         )
+
+nueva_modelo <- nueva_procesado %>% 
+  select(-Numero_identificacion, -Tipo_identificacion)
+
+set.seed(1995)
+nueva_train <- boosting_alejandro %>% sample_frac(size = 0.8)
+nueva_test <- boosting_alejandro %>% anti_join(nueva_train)
+```
+
+## Regresión básica con todas las variables
+
+```{r}
+modelo_lm <- lm(valor_real ~ ., data = nueva_train)
+summary(modelo_lm)
+
+modelo_lm <- lm(valor_total ~ ., data = nueva_train)
+
+broom::augment(modelo_lm, newdata = nueva_test) %>% 
+  yardstick::metrics(truth = valor_real, estimate = .fitted)
+```
+
+rsq 0.415 con todas las vbles
+
+## Regularización
+
+```{r}
+features_matrix_train <- nueva_train %>%
+  select(-valor_real) %>% 
+  mutate(across(c(Edad_al_momento_de_atencion, diabetes.consulta:ccv.urg, n_procedimiento:n_consulta), scale)) %>%
+  as.data.table() %>%
+  #one_hot(cols = c("Sexo", "Zona_residencia", "multi")) %>% 
+data.matrix()
+
+features_matrix_test <- nueva_test %>%
+  select(-valor_real) %>%
+  mutate(across(c(Edad_al_momento_de_atencion, diabetes.consulta:ccv.urg, n_procedimiento:n_consulta), scale)) %>% 
+  as.data.table() %>% 
+  #one_hot(cols = c("Sexo", "Zona_residencia", "multi")) %>% 
+  data.matrix()
+
+
+modelo_lasso <- cv.glmnet(features_matrix_train, nueva_train$valor_real)
+
+prediccion_lasso <- predict(modelo_lasso, 
+        s = modelo_lasso$lambda.min, 
+        newx = features_matrix_test, 
+        type = "response")
+
+tibble(truth = nueva_test$valor_real,
+       estimate = prediccion_lasso[,1]) %>% 
+  metrics(truth = truth, estimate = estimate)
+```
+
+## Boosting
+
+```{r}
+get_mse_boosting_test <- function(lambda, train, test) {
+  test_gbm <- gbm(valor_real ~ ., data = train, distribution = "gaussian", n.trees = 1000, shrinkage = lambda)
+  predict_test <- predict(test_gbm, newdata = test, n.trees = 1000)
+  error <- mean((predict_test - test$valor_real) ^ 2)
+  return(error)
+}
+
+lambda_values <-  seq(0.01, 1, by = 0.02)
+
+mse_test_values_nueva <- sapply(lambda_values, get_mse_boosting_test, nueva_train, nueva_test)
+
+lambda_test_mse_values_df <- data.frame(lambda_values, mse_values = mse_test_values_nueva)
+
+best_lambda_test_boosting <- lambda_test_mse_values_df[which(lambda_test_mse_values_df$mse_values == min(lambda_test_mse_values_df$mse_values)), "lambda_values"]
+
+best_mse_test_boosting <- min(lambda_test_mse_values_df$mse_values)
+
+ggplot(data = lambda_test_mse_values_df) +
+  geom_line(mapping = aes(x = lambda_values, y = mse_values)) +
+  labs(x = TeX("$\\lambda$"), y = "MSE de validación", title = "MSE de validación para diferentes valores de contracción") +
+  theme_economist()
+
+modelo_boosting <- gbm(valor_real ~ ., data = nueva_train, distribution = "gaussian", n.trees = 1000, shrinkage = best_lambda_test_boosting)
+
+tibble(truth = nueva_test$valor_real,
+       estimate = predict(modelo_boosting, newdata = nueva_test, n.trees = 1000)) %>% 
+  metrics(truth = truth, estimate = estimate)
+```
+
+
+## Productización
+
+```{r}
+usuarios_con_pat <- fread("C:/Synced_PCs/IPS Universitaria/Current/caracterización Savia/salidas/rips/rips_usuarios_savia.txt", sep = "|") %>% as_tibble()
+
+savia_pluri <- usuarios_con_pat %>% 
+  select(Numero_identificacion, Edad_al_momento_de_atencion,	Sexo,	Zona_residencia,	diabetes.consulta,	hta.consulta,	epoc.consulta,	ccv.consulta,	diabetes.hosp,	hta.hosp,	epoc.hosp,	ccv.hosp,	diabetes.urg,	hta.urg,	epoc.urg,	ccv.urg,	tiene_diabetes,	tiene_hta,	tiene_epoc,	tiene_ccv,	n_procedimiento = n,	n_medicamento,	n_consulta,	valor_total,	multi
+) %>% 
+  filter(multi > 2) %>%  
+mutate(Numero_identificacion = as.character(Numero_identificacion),
+         Sexo = as_factor(Sexo),
+         Zona_residencia = as_factor(Zona_residencia),
+         tiene_diabetes = as_factor(tiene_diabetes),
+         tiene_hta = as_factor(tiene_hta),
+         tiene_epoc = as_factor(tiene_epoc),
+         tiene_ccv = as_factor(tiene_ccv),
+         multi = as_factor(multi)
+         ) %>% 
+  replace_na(repl = 0)
+
+savia_modelo <- savia_pluri %>% 
+  select(-Numero_identificacion)
+```
+
+# Regresión lineal
+
+```{r}
+broom::augment(modelo_lm, newdata = savia_modelo) %>%
+  yardstick::metrics(truth = valor_total, estimate = .fitted)
+```
+
